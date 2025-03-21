@@ -1,0 +1,23 @@
+# MONAI 및 PyTorch
+torch>=2.0.0
+torchvision>=0.15.0
+monai[all]>=1.2.0
+
+# 데이터 처리 및 시각화
+numpy>=1.23.0
+pandas>=1.5.3
+opencv-python>=4.7.0
+matplotlib>=3.7.0
+seaborn>=0.12.2
+scikit-learn>=1.2.2
+pydicom>=2.3.0
+
+# Grad-CAM (설명 가능 AI)
+torchcam>=0.3.2
+
+# Streamlit 대시보드
+streamlit>=1.15.0
+Pillow>=9.4.0
+
+# 기타 유틸리티
+tqdm>=4.64.0
