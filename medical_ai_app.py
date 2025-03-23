@@ -188,6 +188,101 @@ def prepare_data_preview(data_dicts, max_samples=3):
     
     return preview_info
 
+# MONAI 데이터셋 다운로드 및 처리 함수
+def download_monai_dataset(dataset_name, root_dir, cache_rate):
+    from monai.data import Dataset, CacheDataset
+    from monai.apps import download_and_extract, MedNISTDataset, DecathlonDataset
+    
+    # 루트 디렉토리가 존재하는지 확인하고 없으면 생성
+    if not os.path.exists(root_dir):
+        os.makedirs(root_dir, exist_ok=True)
+        st.info(f"'{root_dir}' 디렉토리를 생성했습니다.")
+    # 데이터셋 준비
+    if dataset_name == "MedNIST":
+        dataset = MedNISTDataset(
+            root_dir=root_dir,
+            transform=None,
+            section="training",
+            download=True,
+            cache_rate=cache_rate
+        )
+        st.session_state.num_classes = 6  # MedNIST는 6개 클래스
+
+        # MedNIST는 분류 데이터셋이므로 MedicalImageTrainer에 맞게 변환
+        data_list = []
+        for item in dataset:
+            # MedNIST 이미지를 NIfTI 형식으로 가정하는 딕셔너리 구조로 변환
+            data_item = {
+                "image": item["image"],
+                "label": item["label"],
+                "task_type": "classification"
+            }
+            data_list.append(data_item)
+
+    else:
+        # Medical Decathlon 데이터셋
+        dataset = DecathlonDataset(
+            root_dir=root_dir,
+            task=dataset_name,
+            transform=None,
+            section="training",
+            download=True,
+            cache_rate=cache_rate
+        )
+
+        # 세그멘테이션 데이터셋 파일 정보 수집
+        data_list = []
+        for item in dataset.data:
+            # Decathlon 데이터셋은 이미지 파일 경로와 라벨 파일 경로 제공
+            data_item = {
+                "image": item["image"],
+                "label": item["label"],
+                "task_type": "segmentation"
+            }
+            data_list.append(data_item)
+
+        # 세그멘테이션 데이터셋의 클래스 수 설정
+        if dataset_name == "Task01_BrainTumour":
+            st.session_state.num_classes = 4
+        elif dataset_name == "Task02_Heart":
+            st.session_state.num_classes = 2
+        elif dataset_name == "Task03_Liver":
+            st.session_state.num_classes = 3
+        elif dataset_name == "Task04_Hippocampus":
+            st.session_state.num_classes = 3
+        elif dataset_name == "Task05_Prostate":
+            st.session_state.num_classes = 3
+        elif dataset_name == "Task06_Lung":
+            st.session_state.num_classes = 2
+        elif dataset_name == "Task07_Pancreas":
+            st.session_state.num_classes = 3
+        elif dataset_name == "Task08_HepaticVessel":
+            st.session_state.num_classes = 3
+        elif dataset_name == "Task09_Spleen":
+            st.session_state.num_classes = 2
+        elif dataset_name == "Task10_Colon":
+            st.session_state.num_classes = 2
+    
+    return data_list, len(data_list)
+
+    # 데이터셋 리스트 파싱하여 저장
+    # data_list = []
+    # for item in dataset:
+    #     # 의료 데이터셋에 맞게 형식 변환
+    #     data_item = {}
+    #     if dataset_name == "MedNIST":
+    #         data_item["image"] = item["image"]
+    #         data_item["label"] = item["label"]
+    #     else:
+    #         data_item["image"] = item["image"]
+    #         data_item["label"] = item["label"]
+    #         data_item["mask"] = item["mask"] if "mask" in item else None
+        
+    #     data_list.append(data_item)
+    
+    # return data_list, dataset.data
+
+
 # --- Fix for Streamlit watcher error with torch ---
 # Disable file watching to prevent the torch._classes error
 if 'STREAMLIT_RUN_PATH' in os.environ:
@@ -326,10 +421,11 @@ with tabs[0]:
                 help="다운로드할 MONAI 데이터셋 선택"
             )
             
+            default_dir = os.path.join(os.getcwd(), "datasets")
             dataset_root_dir = st.text_input(
                 "데이터셋 저장 경로",
-                value="./datasets",
-                help="다운로드한 데이터셋을 저장할 경로"
+                value=default_dir, #"./datasets",
+                help="다운로드한 데이터셋을 저장할 절대 경로 (디렉토리가 없으면 자동 생성됩니다)"
             )
             
             cache_rate = st.slider(
@@ -355,96 +451,9 @@ with tabs[0]:
             if st.button("데이터셋 다운로드 및 준비"):
                 with st.spinner(f"{selected_dataset} 데이터셋을 다운로드하고 준비 중입니다..."):
                     try:
-                        # MONAI 데이터셋 다운로드 및 처리 함수
-                        def download_monai_dataset(dataset_name, root_dir, cache_rate):
-                            from monai.data import Dataset, CacheDataset
-                            from monai.apps import download_and_extract, MedNISTDataset, DecathlonDataset
-                            
-                            # 데이터셋 준비
-                            if dataset_name == "MedNIST":
-                                dataset = MedNISTDataset(
-                                    root_dir=root_dir,
-                                    transform=None,
-                                    section="training",
-                                    download=True,
-                                    cache_rate=cache_rate
-                                )
-                                st.session_state.num_classes = 6  # MedNIST는 6개 클래스
-
-                                # MedNIST는 분류 데이터셋이므로 MedicalImageTrainer에 맞게 변환
-                                data_list = []
-                                for item in dataset:
-                                    # MedNIST 이미지를 NIfTI 형식으로 가정하는 딕셔너리 구조로 변환
-                                    # 실제로는 변환 로직이 필요할 수 있음
-                                    data_item = {
-                                        "image": item["image"],
-                                        "label": item["label"],
-                                        "task_type": "classification"
-                                    }
-                                    data_list.append(data_item)
-
-                            else:
-                                # Medical Decathlon 데이터셋
-                                dataset = DecathlonDataset(
-                                    root_dir=root_dir,
-                                    task=dataset_name,
-                                    transform=None,
-                                    section="training",
-                                    download=True,
-                                    cache_rate=cache_rate
-                                )
-
-                                # 세그멘테이션 데이터셋 파일 정보 수집
-                                data_list = []
-                                for item in dataset.data:
-                                    # Decathlon 데이터셋은 이미지 파일 경로와 라벨 파일 경로 제공
-                                    data_item = {
-                                        "image": item["image"],
-                                        "label": item["label"],
-                                        "task_type": "segmentation"
-                                    }
-                                    data_list.append(data_item)
-
-                                # 세그멘테이션 데이터셋의 클래스 수 설정
-                                if dataset_name == "Task01_BrainTumour":
-                                    st.session_state.num_classes = 4
-                                elif dataset_name == "Task02_Heart":
-                                    st.session_state.num_classes = 2
-                                elif dataset_name == "Task03_Liver":
-                                    st.session_state.num_classes = 3
-                                elif dataset_name == "Task04_Hippocampus":
-                                    st.session_state.num_classes = 3
-                                elif dataset_name == "Task05_Prostate":
-                                    st.session_state.num_classes = 3
-                                elif dataset_name == "Task06_Lung":
-                                    st.session_state.num_classes = 2
-                                elif dataset_name == "Task07_Pancreas":
-                                    st.session_state.num_classes = 3
-                                elif dataset_name == "Task08_HepaticVessel":
-                                    st.session_state.num_classes = 3
-                                elif dataset_name == "Task09_Spleen":
-                                    st.session_state.num_classes = 2
-                                elif dataset_name == "Task10_Colon":
-                                    st.session_state.num_classes = 2
-                            
-                            return data_list, len(data_list)
-                        
-                            # 데이터셋 리스트 파싱하여 저장
-                            # data_list = []
-                            # for item in dataset:
-                            #     # 의료 데이터셋에 맞게 형식 변환
-                            #     data_item = {}
-                            #     if dataset_name == "MedNIST":
-                            #         data_item["image"] = item["image"]
-                            #         data_item["label"] = item["label"]
-                            #     else:
-                            #         data_item["image"] = item["image"]
-                            #         data_item["label"] = item["label"]
-                            #         data_item["mask"] = item["mask"] if "mask" in item else None
-                                
-                            #     data_list.append(data_item)
-                            
-                            # return data_list, dataset.data
+                        # 디렉토리 상태 확인 및 출력
+                        if not os.path.exists(dataset_root_dir):
+                            st.info(f"'{dataset_root_dir}' 디렉토리가 존재하지 않습니다. 자동으로 생성합니다.")
                         
                         # 데이터셋 다운로드 실행
                         # data_list, dataset_info = download_monai_dataset(
@@ -523,8 +532,15 @@ with tabs[0]:
                         
                     except Exception as e:
                         st.error(f"데이터셋 다운로드 중 오류가 발생했습니다: {str(e)}")
-                        st.info("일부 데이터셋은 크기가 큰 경우 다운로드에 시간이 오래 걸릴 수 있습니다.")
-
+                        st.info("문제 해결 팁:")
+                        st.info("1. 저장 경로에 쓰기 권한이 있는지 확인하세요.")
+                        st.info("2. 인터넷 연결 상태를 확인하세요.")
+                        st.info("3. 일부 데이터셋은 크기가 큰 경우 다운로드에 시간이 오래 걸릴 수 있습니다.")
+                        
+                        # 더 자세한 오류 정보 표시 (디버깅용)
+                        with st.expander("상세 오류 정보"):
+                            import traceback
+                            st.code(traceback.format_exc())
 
 
         # 모델 학습 시작 버튼
@@ -1496,4 +1512,4 @@ with tabs[2]:
 
 # Add a footer
 st.markdown("---")
-st.markdown("© 2025 의료 영상 AI 학습 시스템")
+st.markdown("© 2025 ETRI 의료 영상 AI 학습 시스템 TANGO-MEDICAL")
