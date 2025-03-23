@@ -9,6 +9,13 @@ source tango_medical_env/bin/activate
 ```
 
 ## Usage
+
+### Quick Inference
 ```bash
 streamlit run dashboard.py
+```
+
+### Train/Fine-Tune, Inference and Some learning materials for Medical AI
+```bash
+streamlit run medical_ai_app.py
 ```
