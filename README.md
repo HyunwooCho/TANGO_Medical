@@ -90,7 +90,7 @@ training:
 Extend TANGO_Medical with custom modules:
 ```python
 # Example: Adding a custom model
-from tango_medical.models import BaseModel
+from tango_medical.nets import BaseModel
 
 class CustomMedicalModel(BaseModel):
     def __init__(self, config):
