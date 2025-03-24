@@ -175,5 +175,6 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
-# Datasets
+# Downloaded Models & Datasets
 datasets/
+models/
