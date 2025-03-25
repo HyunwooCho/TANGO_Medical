@@ -14,9 +14,15 @@ import glob
 import zipfile
 import io
 from pathlib import Path
+import asyncio
 
 # Import the training module
-from trainer import MedicalImageTrainer, run_training_demo, generate_sample_data
+from trainer import MedicalImageTrainer
+from data import (
+    generate_sample_data, 
+    download_monai_dataset, 
+    prepare_data_preview,
+)
 
 # Set page config as the first Streamlit command
 st.set_page_config(
@@ -26,9 +32,6 @@ st.set_page_config(
 )
 
 # --- setting & utilities
-def get_trainer():
-    return MedicalImageTrainer()
-
 # 디렉토리에서 NIfTI 파일 찾기
 def find_nifti_files(directory):
     nifti_files = []
@@ -107,181 +110,27 @@ def find_paired_files(directory):
 
     return pairs
 
-# 학습 데이터셋 미리보기
-def prepare_data_preview(data_dicts, max_samples=3):
-    """
-    학습 데이터셋 미리보기 준비
+# Trainer 초기화
+def initialize_trainer(model_type, num_classes, learning_rate, data, batch_size=16, val_ratio=0.2):
     
-    Args:
-        data_dicts: 데이터 파일 경로 정보가 담긴 딕셔너리 리스트
-        max_samples: 표시할 최대 샘플 수
-        
-    Returns:
-        dict: 미리보기 정보
-    """
-    import nibabel as nib
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from monai.transforms import LoadImage
-    import io
-    from PIL import Image
-    
-    preview_info = {
-        "total_samples": len(data_dicts),
-        "samples": []
-    }
-    
-    # 로더 준비
-    loader = LoadImage()
-    
-    # 최대 샘플 수 제한
-    samples_to_preview = min(max_samples, len(data_dicts))
-    
-    for i in range(samples_to_preview):
-        sample = data_dicts[i]
-        
-        # 영상 로드
-        try:
-            img_data, _ = loader(sample["image"])
-            seg_data, _ = loader(sample["label"])
-            
-            # 중앙 슬라이스 추출
-            slice_idx = img_data.shape[-1] // 2
-            img_slice = img_data[0, :, :, slice_idx]
-            seg_slice = seg_data[0, :, :, slice_idx]
-            
-            # 미리보기 이미지 생성
-            fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-            
-            # 원본 이미지
-            axes[0].imshow(img_slice, cmap='gray')
-            axes[0].set_title("원본 영상")
-            axes[0].axis('off')
-            
-            # 세그멘테이션 마스크
-            axes[1].imshow(seg_slice, cmap='viridis')
-            axes[1].set_title("세그멘테이션 마스크")
-            axes[1].axis('off')
-            
-            # 이미지를 바이트로 변환
-            buf = io.BytesIO()
-            plt.tight_layout()
-            fig.savefig(buf, format='png')
-            buf.seek(0)
-            plt.close(fig)
-            
-            # 샘플 정보 추가
-            preview_info["samples"].append({
-                "index": i,
-                "image_path": sample["image"],
-                "label_path": sample["label"],
-                "preview_img": buf
-            })
-            
-        except Exception as e:
-            preview_info["samples"].append({
-                "index": i,
-                "image_path": sample["image"],
-                "label_path": sample["label"],
-                "error": str(e)
-            })
-    
-    return preview_info
+    # 학습기 초기화
+    trainer = MedicalImageTrainer(model_type, num_classes, learning_rate)
 
-# MONAI 데이터셋 다운로드 및 처리 함수
-def download_monai_dataset(dataset_name, root_dir, cache_rate):
-    from monai.data import Dataset, CacheDataset
-    from monai.apps import download_and_extract, MedNISTDataset, DecathlonDataset
-    
-    # 루트 디렉토리가 존재하는지 확인하고 없으면 생성
-    if not os.path.exists(root_dir):
-        os.makedirs(root_dir, exist_ok=True)
-        st.info(f"'{root_dir}' 디렉토리를 생성했습니다.")
-    # 데이터셋 준비
-    if dataset_name == "MedNIST":
-        dataset = MedNISTDataset(
-            root_dir=root_dir,
-            transform=None,
-            section="training",
-            download=True,
-            cache_rate=cache_rate
-        )
-        st.session_state.num_classes = 6  # MedNIST는 6개 클래스
+    # 데이터 준비
+    trainer.prepare_data(data, val_ratio=val_ratio, batch_size=batch_size)
 
-        # MedNIST는 분류 데이터셋이므로 MedicalImageTrainer에 맞게 변환
-        data_list = []
-        for item in dataset:
-            # MedNIST 이미지를 NIfTI 형식으로 가정하는 딕셔너리 구조로 변환
-            data_item = {
-                "image": item["image"],
-                "label": item["label"],
-                "task_type": "classification"
-            }
-            data_list.append(data_item)
+    # 모델 생성
+    trainer.create_model()
 
-    else:
-        # Medical Decathlon 데이터셋
-        dataset = DecathlonDataset(
-            root_dir=root_dir,
-            task=dataset_name,
-            transform=None,
-            section="training",
-            download=True,
-            cache_rate=cache_rate
-        )
+    return trainer
 
-        # 세그멘테이션 데이터셋 파일 정보 수집
-        data_list = []
-        for item in dataset.data:
-            # Decathlon 데이터셋은 이미지 파일 경로와 라벨 파일 경로 제공
-            data_item = {
-                "image": item["image"],
-                "label": item["label"],
-                "task_type": "segmentation"
-            }
-            data_list.append(data_item)
+# 비동기적으로 학습 수행(비동기 제너레이션 방식)
+# async def run_training(trainer, total_epochs, progress_callback):
+#     for epoch in range(1, total_epochs+1):
+#         async for batch_metrics in trainer.train(epoch):
+#             await progress_callback(batch_metrics)
 
-        # 세그멘테이션 데이터셋의 클래스 수 설정
-        if dataset_name == "Task01_BrainTumour":
-            st.session_state.num_classes = 4
-        elif dataset_name == "Task02_Heart":
-            st.session_state.num_classes = 2
-        elif dataset_name == "Task03_Liver":
-            st.session_state.num_classes = 3
-        elif dataset_name == "Task04_Hippocampus":
-            st.session_state.num_classes = 3
-        elif dataset_name == "Task05_Prostate":
-            st.session_state.num_classes = 3
-        elif dataset_name == "Task06_Lung":
-            st.session_state.num_classes = 2
-        elif dataset_name == "Task07_Pancreas":
-            st.session_state.num_classes = 3
-        elif dataset_name == "Task08_HepaticVessel":
-            st.session_state.num_classes = 3
-        elif dataset_name == "Task09_Spleen":
-            st.session_state.num_classes = 2
-        elif dataset_name == "Task10_Colon":
-            st.session_state.num_classes = 2
-    
-    return data_list, len(data_list)
-
-    # 데이터셋 리스트 파싱하여 저장
-    # data_list = []
-    # for item in dataset:
-    #     # 의료 데이터셋에 맞게 형식 변환
-    #     data_item = {}
-    #     if dataset_name == "MedNIST":
-    #         data_item["image"] = item["image"]
-    #         data_item["label"] = item["label"]
-    #     else:
-    #         data_item["image"] = item["image"]
-    #         data_item["label"] = item["label"]
-    #         data_item["mask"] = item["mask"] if "mask" in item else None
-        
-    #     data_list.append(data_item)
-    
-    # return data_list, dataset.data
-
+# 
 
 # --- Fix for Streamlit watcher error with torch ---
 # Disable file watching to prevent the torch._classes error
@@ -296,8 +145,8 @@ os.environ["STREAMLIT_GLOBAL_WATCHER_MAX_FILES"] = "5000"
 # st.sidebar.info(f"MONAI version: {monai.__version__}")
 
 # 세션 상태 초기화
-if 'trainer' not in st.session_state:
-    st.session_state.trainer = get_trainer()
+# if 'trainer' not in st.session_state:
+#     st.session_state.trainer = None
 if 'training_in_progress' not in st.session_state:
     st.session_state.training_in_progress = False
 if 'current_epoch' not in st.session_state:
@@ -330,7 +179,7 @@ with tabs[0]:
             value=2,
             help="배경 클래스 포함한 전체 클래스 수"
         )
-        
+
         learning_rate = st.number_input(
             "학습률",
             min_value=0.00001,
@@ -343,7 +192,7 @@ with tabs[0]:
         num_epochs = st.number_input(
             "에포크 수",
             min_value=1,
-            max_value=200,
+            max_value=10000,
             value=20,
             help="학습 반복 횟수"
         )
@@ -351,12 +200,37 @@ with tabs[0]:
         batch_size = st.number_input(
             "배치 크기",
             min_value=1,
-            max_value=16,
-            value=2,
+            max_value=1024,
+            value=16,
             help="한 번에 처리할 데이터 수 (메모리에 따라 조정)"
         )
         
+        # 모델 학습 시작 버튼
+        if st.button("모델 다운로드 및 초기화"):
+            if 'training_data' not in st.session_state:
+                st.error("학습 데이터가 없습니다. 먼저 데이터를 로드해주세요.")
+            else:
+                if 'trainer' not in st.session_state:
+                    if 'num_classes' in st.session_state:
+                        num_classes = st.session_state.num_classes
+                    with st.spinner("모델 학습을 초기화 중입니다..."):
+                        trainer = initialize_trainer(
+                            model_type=model_type,
+                            num_classes=st.session_state.num_classes if st.session_state.num_classes else num_classes,
+                            learning_rate=learning_rate,
+                            data=st.session_state.training_data,
+                            batch_size=batch_size,
+                            val_ratio=st.session_state.val_ratio if st.session_state.val_ratio else None
+                        )
+                        st.session_state.trainer = trainer
+                        st.session_state.training_in_progress = True
+                        st.session_state.current_epoch = 0
+                        st.session_state.total_epochs = num_epochs
+                        # st.rerun()
+                        st.success(f"{model_type} 모델을 성공적으로 초기화하였습니다.")
+
         # 데이터 소스 선택
+        st.subheader("데이터셋 설정")
         data_source = st.radio(
             "데이터 소스",
             ["샘플 데이터 생성", "데이터셋 업로드", "디렉토리 선택", "MONAI 데이터셋 다운로드"],
@@ -400,9 +274,10 @@ with tabs[0]:
                     loaded_data = load_data_from_directory(data_dir, num_classes)
                     st.session_state.training_data = loaded_data
                     st.success(f"디렉토리에서 데이터를 성공적으로 로드했습니다!")
+    
         elif data_source == "MONAI 데이터셋 다운로드":
             monai_dataset_options = [
-                "MedNIST",
+                # "MedNIST", # 분류(classification)용 데이터셋이므로 분할(segmentation)용으로 변환이 필요함
                 "Task01_BrainTumour",
                 "Task02_Heart",
                 "Task03_Liver",
@@ -456,79 +331,19 @@ with tabs[0]:
                             st.info(f"'{dataset_root_dir}' 디렉토리가 존재하지 않습니다. 자동으로 생성합니다.")
                         
                         # 데이터셋 다운로드 실행
-                        # data_list, dataset_info = download_monai_dataset(
-                        data_list, data_count = download_monai_dataset(
+                        data_list, data_count, num_classes = download_monai_dataset(
                             selected_dataset, 
                             dataset_root_dir, 
                             cache_rate
                         )
-                        
-                        # MedicalImageTrainer 인스턴스 생성 및 초기화
-                        # 이미 생성되어 있다면 st.session_state에서 가져오기
-                        if 'trainer' not in st.session_state:
-                            num_classes = st.session_state.num_classes
-                            trainer = MedicalImageTrainer(num_classes=num_classes)
-                            st.session_state.trainer = trainer
-                        else:
-                            trainer = st.session_state.trainer
-                            trainer.num_classes = st.session_state.num_classes
-
-                        # 데이터 준비 - trainer.prepare_data 호출
-                        with st.spinner("데이터 로더를 준비 중입니다..."):
-                            # 데이터셋을 학습/검증 데이터로 분할
-                            from monai.data import partition_dataset
-                            train_files, val_files = partition_dataset(
-                                data_list,
-                                ratios=[1 - val_ratio, val_ratio],
-                                shuffle=True
-                            )
-                            
-                            # 데이터 로더 생성
-                            train_loader, val_loader = trainer.prepare_data(
-                                train_files=train_files,
-                                val_files=val_files,
-                                cache_data=enable_cache
-                            )
-
-                            # 세션 상태에 데이터 로더 저장
-                            st.session_state.train_loader = train_loader
-                            st.session_state.val_loader = val_loader
 
                         # 데이터 정보 저장
-                        # st.session_state.training_data = data_list
-                        
+                        st.session_state.training_data = data_list
+                        st.session_state.val_ratio = val_ratio
+                        st.session_state.num_classes = num_classes
+
                         # 다운로드 완료 메시지
                         st.success(f"{selected_dataset} 데이터셋을 성공적으로 다운로드했습니다! ({len(data_list)}개 데이터)")
-                        st.info(f"학습 데이터: {len(train_files)}개, 검증 데이터: {len(val_files)}개")
-                        
-                        # 데이터셋 정보 표시
-                        with st.expander("데이터셋 정보"):
-                            st.write(f"데이터셋: {selected_dataset}")
-                            # st.write(f"데이터 수: {len(data_list)}")
-                            st.write(f"총 데이터 수: {data_count}")
-                            st.write(f"클래스 수: {st.session_state.num_classes}")
-                            st.write(f"학습 데이터: {len(train_files)}개")
-                            st.write(f"검증 데이터: {len(val_files)}개")
-                            
-                            # 학습 준비 완료 상태로 설정
-                            st.session_state.data_prepared = True
-
-                            # 학습 시작 버튼 활성화
-                            if st.button("학습 시작"):
-                                if 'trainer' in st.session_state and st.session_state.data_prepared:
-                                    st.session_state.start_training = True
-                                    st.experimental_rerun()
-                                else:
-                                    st.warning("먼저 데이터를 준비해야 합니다.")
-
-                            # 샘플 데이터 미리보기 (첫 번째 이미지)
-                            if len(data_list) > 0:
-                                if selected_dataset == "MedNIST":
-                                    st.write("샘플 이미지 미리보기:")
-                                    sample_img = data_list[0]["image"]
-                                    st.image(sample_img, caption="샘플 이미지", width=200)
-                                else:
-                                    st.write("세그멘테이션 데이터셋 로드 완료")
                         
                     except Exception as e:
                         st.error(f"데이터셋 다운로드 중 오류가 발생했습니다: {str(e)}")
@@ -542,25 +357,6 @@ with tabs[0]:
                             import traceback
                             st.code(traceback.format_exc())
 
-
-        # 모델 학습 시작 버튼
-        # if st.button("모델 학습 시작"):
-        #     if 'training_data' not in st.session_state:
-        #         st.error("학습 데이터가 없습니다. 먼저 데이터를 로드해주세요.")
-        #     else:
-        #         with st.spinner("모델 학습을 초기화 중입니다..."):
-        #             trainer = initialize_trainer(
-        #                 model_type=model_type,
-        #                 num_classes=num_classes,
-        #                 learning_rate=learning_rate,
-        #                 batch_size=batch_size,
-        #                 data=st.session_state.training_data
-        #             )
-        #             st.session_state.trainer = trainer
-        #             st.session_state.training_in_progress = True
-        #             st.session_state.current_epoch = 0
-        #             st.session_state.total_epochs = num_epochs
-        #             st.experimental_rerun()
                     
     # 우측 컬럼 - 학습 진행 상황 및 데이터 시각화
     with col2:
@@ -568,21 +364,17 @@ with tabs[0]:
         
         # 학습 진행 중일 때 진행 상태 표시
         if st.session_state.training_in_progress:
-            progress = st.progress(0)
-            status_text = st.empty()
-            metrics_container = st.container()
-            
-            # 학습 진행 상태 및 지표 업데이트
-            if st.session_state.current_epoch < st.session_state.total_epochs:
-                try:
-                    # 한 에포크 학습 진행
-                    metrics = st.session_state.trainer.train_epoch()
-                    st.session_state.current_epoch += 1
-                    
-                    # 진행 상태 업데이트
-                    progress.progress(st.session_state.current_epoch / st.session_state.total_epochs)
+            if st.button("모델 학습 시작"):
+                # Streamlit UI 요소 준비
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                metrics_container = st.container()
+
+                async def update_progress(metrics):
+                    progress = metrics['epoch'] / st.session_state.total_epochs
+                    progress_bar.progress(progress)
                     status_text.text(f"에포크 {st.session_state.current_epoch}/{st.session_state.total_epochs} 완료")
-                    
+            
                     # 학습 지표 표시
                     with metrics_container:
                         col_loss, col_dice, col_lr = st.columns(3)
@@ -592,55 +384,84 @@ with tabs[0]:
                             st.metric("Dice 점수", f"{metrics['dice']:.4f}")
                         with col_lr:
                             st.metric("학습률", f"{metrics['learning_rate']:.6f}")
-                        
-                        # 샘플 이미지 시각화 (있는 경우)
-                        if 'sample_images' in metrics:
-                            st.image(metrics['sample_images'], caption=["입력", "예측", "정답"], width=150)
-                    
-                    # 자동으로 다음 에포크 진행을 위한 재실행
-                    if st.session_state.current_epoch < st.session_state.total_epochs:
-                        st.experimental_rerun()
-                    else:
-                        st.session_state.training_in_progress = False
-                        st.success("모델 학습이 완료되었습니다!")
-                        
-                        # 모델 저장 버튼 표시
-                        if st.button("모델 저장"):
-                            model_path = save_model(st.session_state.trainer)
-                            st.success(f"모델이 저장되었습니다: {model_path}")
                 
-                except Exception as e:
-                    st.error(f"학습 중 오류가 발생했습니다: {str(e)}")
-                    st.session_state.training_in_progress = False
+                # 비동기 학습 실행
+                asyncio.run(st.session_state.trainer.train( 
+                    num_epochs=st.session_state.total_epochs,
+                    progress_callback=update_progress
+                ))
+
+            # 학습 진행 상태 및 지표 업데이트
+            # if st.session_state.current_epoch < st.session_state.total_epochs:
+            #     try:
+            #         # 한 에포크 학습 진행
+            #         metrics = st.session_state.trainer.train_epoch()
+            #         st.session_state.current_epoch += 1
+                    
+            #         # 진행 상태 업데이트
+            #         progress.progress(st.session_state.current_epoch / st.session_state.total_epochs)
+            #         status_text.text(f"에포크 {st.session_state.current_epoch}/{st.session_state.total_epochs} 완료")
+                    
+            #         # 학습 지표 표시
+            #         with metrics_container:
+            #             col_loss, col_dice, col_lr = st.columns(3)
+            #             with col_loss:
+            #                 st.metric("손실 (Loss)", f"{metrics['loss']:.4f}")
+            #             with col_dice:
+            #                 st.metric("Dice 점수", f"{metrics['dice']:.4f}")
+            #             with col_lr:
+            #                 st.metric("학습률", f"{metrics['learning_rate']:.6f}")
+                        
+            #             # 샘플 이미지 시각화 (있는 경우)
+            #             if 'sample_images' in metrics:
+            #                 st.image(metrics['sample_images'], caption=["입력", "예측", "정답"], width=150)
+                    
+            #         # 자동으로 다음 에포크 진행을 위한 재실행
+            #         if st.session_state.current_epoch < st.session_state.total_epochs:
+            #             st.experimental_rerun()
+            #         else:
+            #             st.session_state.training_in_progress = False
+            #             st.success("모델 학습이 완료되었습니다!")
+                        
+            #             # 모델 저장 버튼 표시
+            #             if st.button("모델 저장"):
+            #                 model_path = save_model(st.session_state.trainer)
+            #                 st.success(f"모델이 저장되었습니다: {model_path}")
+                
+            #     except Exception as e:
+            #         st.error(f"학습 중 오류가 발생했습니다: {str(e)}")
+            #         st.session_state.training_in_progress = False
         
         else:
             # 학습 시작 전 데이터 미리보기
             if 'training_data' in st.session_state:
                 st.subheader("데이터 미리보기")
-                preview_data = prepare_data_preview(st.session_state.training_data)
+                preview_data = prepare_data_preview(
+                    st.session_state.training_data,
+                    max_samples=2
+                )
                 
                 # 이미지 미리보기 표시
                 # st.image(preview_data['images'][:3], 
                 #          caption=preview_data['captions'][:3], 
                 #          width=200)
-                
-                for sample in preview_data["samples"]:
-                    st.subheader(f"샘플 #{sample['index'] + 1}")
-                    
-                    if "error" in sample:
-                        st.error(f"이미지 로드 오류: {sample['error']}")
-                    else:
-                        st.image(sample["preview_img"], caption="중앙 슬라이스 미리보기")
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.write(f"이미지 경로: {sample['image_path']}")
-                        with col2:
-                            st.write(f"라벨 경로: {sample['label_path']}")
-                
+
                 # 데이터 통계 표시
                 # st.write(f"총 데이터 수: {preview_data['total_samples']}")
                 # st.write(f"클래스 분포: {preview_data['class_distribution']}")
+                
+                for sample in preview_data["samples"]:
+                    st.subheader(f"샘플 #{sample['index'] + 1}")
+                    if "error" in sample:
+                        st.error(f"이미지 로드 오류: {sample['error']}")
+
+                        # 더 자세한 오류 정보 표시 (디버깅용)
+                        with st.expander("상세 오류 정보"):
+                            import traceback
+                            st.code(traceback.format_exc())
+                    else:
+                        st.image(sample["preview_img"], caption="중앙 슬라이스 미리보기")
+
             else:
                 st.info("왼쪽에서 데이터를 로드한 후 학습을 시작하세요.")
 
