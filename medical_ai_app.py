@@ -138,12 +138,17 @@ os.environ["STREAMLIT_GLOBAL_WATCHER_MAX_FILES"] = "5000"
 # 세션 상태 초기화
 # if 'trainer' not in st.session_state:
 #     st.session_state.trainer = None
+if 'data_name' not in st.session_state:
+    st.session_state.data_name = None
 if 'training_in_progress' not in st.session_state:
     st.session_state.training_in_progress = False
 if 'current_epoch' not in st.session_state:
     st.session_state.current_epoch = 0
 if 'total_epochs' not in st.session_state:
     st.session_state.total_epochs = 0
+
+def update_num_classes():
+    st.session_state["num_classes"] = st.session_state["num_classes_from_dataset"]
 
 # --- UI 구성 ---
 st.title("🩺 의료 영상 AI 학습 시스템")
@@ -163,13 +168,13 @@ with tabs[0]:
             help="사용할 모델 아키텍처"
         )
         
-        num_classes = st.number_input(
-            "분할 클래스 수",
-            min_value=2,
-            max_value=10,
-            value=2,
-            help="배경 클래스 포함한 전체 클래스 수"
-        )
+        # num_classes = st.number_input(
+        #     "분할 클래스 수",
+        #     min_value=2,
+        #     max_value=10,
+        #     value=2,
+        #     help="배경 클래스 포함한 전체 클래스 수"
+        # )
 
         learning_rate = st.number_input(
             "학습률",
@@ -191,8 +196,8 @@ with tabs[0]:
         batch_size = st.number_input(
             "배치 크기",
             min_value=1,
-            max_value=1024,
-            value=16,
+            max_value=64,
+            value=2,
             help="한 번에 처리할 데이터 수 (메모리에 따라 조정)"
         )
         
@@ -213,8 +218,9 @@ with tabs[0]:
                             batch_size=batch_size,
                             val_ratio=st.session_state.val_ratio if st.session_state.val_ratio else None
                         )
+                        trainer.get_args()
                         st.session_state.trainer = trainer
-                        st.session_state.training_in_progress = True
+                        # st.session_state.training_in_progress = True
                         st.session_state.current_epoch = 0
                         st.session_state.total_epochs = num_epochs
                         # st.rerun()
@@ -329,12 +335,14 @@ with tabs[0]:
                         )
 
                         # 데이터 정보 저장
+                        st.session_state.data_name = selected_dataset
                         st.session_state.training_data = data_list
+                        st.session_state.data_count = data_count
                         st.session_state.val_ratio = val_ratio
                         st.session_state.num_classes = num_classes
 
                         # 다운로드 완료 메시지
-                        st.success(f"{selected_dataset} 데이터셋을 성공적으로 다운로드했습니다! ({len(data_list)}개 데이터)")
+                        st.success(f"데이터셋 다운로드 성공!")
                         
                     except Exception as e:
                         st.error(f"데이터셋 다운로드 중 오류가 발생했습니다: {str(e)}")
@@ -347,90 +355,113 @@ with tabs[0]:
                         with st.expander("상세 오류 정보"):
                             import traceback
                             st.code(traceback.format_exc())
+            
+            # if st.session_state.data_name:
+            #     st.write(f"**데이터셋 이름:** `{st.session_state.data_name}`")
+            #     st.write(f"**총 데이터 개수:** `{st.session_state.data_count}` 개")
+            #     st.write(f"**클래스 수:** `{st.session_state.num_classes}` 개")
 
                     
     # 우측 컬럼 - 학습 진행 상황 및 데이터 시각화
     with col2:
         st.subheader("학습 진행 상황 및 데이터 시각화")
-        row1, row2 = st.container(), st.container()
+        # row1, row2 = st.container(), st.container()
 
         # 학습 진행 중일 때 진행 상태 표시
-        with row1:
-            if st.session_state.training_in_progress:
-                if st.button("모델 학습 시작"):
-                    # Streamlit UI 요소 준비
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    metrics_container = st.container()
+        # with row1:
+        # if st.session_state.training_in_progress:
+        if 'trainer' in st.session_state:
+            model_info = st.session_state.trainer.get_args()
+            left, right = st.columns([1,1])
 
-                    async def update_progress(metrics):
-                        progress = metrics['epoch'] / st.session_state.total_epochs
-                        progress_bar.progress(progress)
-                        status_text.text(f"에포크 {metrics['epoch']}/{st.session_state.total_epochs} 완료")
+            # Left column for model information
+            with left:
+                st.markdown(
+                    f"""
+                    <div style="background-color: #F0F8FF; padding: 20px; border-radius: 10px; box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);">
+                        <h3 style="color: #1E90FF;">모델: <span style="color: #4682B4;">{model_info['model_type']}</span></h3>
+                        <div style="display: inline-block; background-color: #E6F7FF; padding: 15px; margin: 5px; border-radius: 8px; width: auto;">
+                            <p style="color: #333;">학습률: <span style="color: #4682B4;">{model_info['learning_rate']}</span></p>
+                        </div>
+                        <div style="display: inline-block; background-color: #E6F7FF; padding: 15px; margin: 5px; border-radius: 8px; width: auto;">
+                            <p style="color: #333;">디바이스: <span style="color: #4682B4;">{model_info['device']}</span></p>
+                        </div>
+                        <div style="display: inline-block; background-color: #E6F7FF; padding: 15px; margin: 5px; border-radius: 8px; width: auto;">
+                            <p style="color: #333;">옵티마이저: <span style="color: #4682B4;">{model_info['optim']}</span></p>
+                        </div>
+                        <div style="display: inline-block; background-color: #E6F7FF; padding: 15px; margin: 5px; border-radius: 8px; width: auto;">
+                            <p style="color: #333;">손실함수: <span style="color: #4682B4;">{model_info['loss_func']}</span></p>
+                        </div>
+                        <div style="display: inline-block; background-color: #E6F7FF; padding: 15px; margin: 5px; border-radius: 8px; width: auto;">
+                            <p style="color: #333;">검증메트릭: <span style="color: #4682B4;">{model_info['metric']}</span></p>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True
+                )
 
-                        # 학습 지표 표시
-                        with metrics_container:
-                            col_loss, col_dice, col_lr = st.columns(3)
-                            with col_loss:
-                                st.metric("손실 (Loss)", f"{metrics['loss']:.4f}")
-                            with col_dice:
-                                st.metric("Dice 점수", f"{metrics['dice']:.4f}")
-                            with col_lr:
-                                st.metric("학습률", f"{metrics['learning_rate']:.6f}")
+            # Right column for dataset information
+            with right:
+                st.markdown(
+                    f"""
+                    <div style="background-color: #FFF0F5; padding: 20px; border-radius: 10px; box-shadow: 2px 2px 5px rgba(0, 0, 0, 0.1);">
+                        <h3 style="color: #FF1493;">데이터셋: <span style="color: #8B008B;">{st.session_state.data_name}</span></h3>
+                        <div style="display: inline-block; background-color: #FDE2E4; padding: 15px; margin: 5px; border-radius: 8px; width: auto;">
+                            <p style="color: #333;">총 데이터 개수: <span style="color: #8B008B;">{st.session_state.data_count} 개</span></p>
+                        </div>
+                        <div style="display: inline-block; background-color: #FDE2E4; padding: 15px; margin: 5px; border-radius: 8px; width: auto;">
+                            <p style="color: #333;">학습 데이터: <span style="color: #8B008B;">{model_info['train_data_count']} 개</span></p>
+                        </div>
+                        <div style="display: inline-block; background-color: #FDE2E4; padding: 15px; margin: 5px; border-radius: 8px; width: auto;">
+                            <p style="color: #333;">검증 데이터: <span style="color: #8B008B;">{model_info['val_data_count']} 개</span></p>
+                        </div>
+                        <div style="display: inline-block; background-color: #FDE2E4; padding: 15px; margin: 5px; border-radius: 8px; width: auto;">
+                            <p style="color: #333;">배치 크기: <span style="color: #8B008B;">{model_info['batch_size']} 개</span></p>
+                        </div>
+                        <div style="display: inline-block; background-color: #FDE2E4; padding: 15px; margin: 5px; border-radius: 8px; width: auto;">
+                            <p style="color: #333;">클래스 수: <span style="color: #8B008B;">{model_info['num_classes']} 개</span></p>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True
+                )
+            if not st.session_state.training_in_progress:
+                start_button = st.button("모델 학습 시작")
+            else:
+                start_button = False
 
-                            # 샘플 이미지 시각화 (있는 경우)
-                            if 'sample_images' in metrics:
-                                st.image(metrics['sample_images'], caption=["입력", "예측", "정답"], width=150)
-                    
-                    # 비동기 학습 실행
-                    asyncio.run(st.session_state.trainer.train_with_callback( 
-                        num_epochs=st.session_state.total_epochs,
-                        progress_callback=update_progress
-                    ))
+            if start_button:
+                st.session_state.training_in_progress = True
+                # Streamlit UI 요소 준비
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                metrics_container = st.container()
 
-                # 학습 진행 상태 및 지표 업데이트 (X 이런 식으로는 동작 안 함; 비동기식 동작이 필요함)
-                # if st.session_state.current_epoch < st.session_state.total_epochs:
-                #     try:
-                #         # 한 에포크 학습 진행
-                #         metrics = st.session_state.trainer.train_epoch()
-                #         st.session_state.current_epoch += 1
-                        
-                #         # 진행 상태 업데이트
-                #         progress.progress(st.session_state.current_epoch / st.session_state.total_epochs)
-                #         status_text.text(f"에포크 {st.session_state.current_epoch}/{st.session_state.total_epochs} 완료")
-                        
-                #         # 학습 지표 표시
-                #         with metrics_container:
-                #             col_loss, col_dice, col_lr = st.columns(3)
-                #             with col_loss:
-                #                 st.metric("손실 (Loss)", f"{metrics['loss']:.4f}")
-                #             with col_dice:
-                #                 st.metric("Dice 점수", f"{metrics['dice']:.4f}")
-                #             with col_lr:
-                #                 st.metric("학습률", f"{metrics['learning_rate']:.6f}")
-                            
-                #             # 샘플 이미지 시각화 (있는 경우)
-                #             if 'sample_images' in metrics:
-                #                 st.image(metrics['sample_images'], caption=["입력", "예측", "정답"], width=150)
-                        
-                #         # 자동으로 다음 에포크 진행을 위한 재실행
-                #         if st.session_state.current_epoch < st.session_state.total_epochs:
-                #             st.experimental_rerun()
-                #         else:
-                #             st.session_state.training_in_progress = False
-                #             st.success("모델 학습이 완료되었습니다!")
-                            
-                #             # 모델 저장 버튼 표시
-                #             if st.button("모델 저장"):
-                #                 model_path = save_model(st.session_state.trainer)
-                #                 st.success(f"모델이 저장되었습니다: {model_path}")
-                    
-                #     except Exception as e:
-                #         st.error(f"학습 중 오류가 발생했습니다: {str(e)}")
-                #         st.session_state.training_in_progress = False
+                async def update_progress(metrics):
+                    progress = metrics['epoch'] / st.session_state.total_epochs
+                    progress_bar.progress(progress)
+                    status_text.text(f"에포크 {metrics['epoch']}/{st.session_state.total_epochs} 완료")
+
+                    # 학습 지표 표시
+                    with metrics_container:
+                        col_loss, col_dice, col_lr = st.columns(3)
+                        with col_loss:
+                            st.metric("손실 (Loss)", f"{metrics['loss']:.4f}")
+                        with col_dice:
+                            st.metric("Dice 점수", f"{metrics['dice']:.4f}")
+                        with col_lr:
+                            st.metric("학습률", f"{metrics['learning_rate']:.6f}")
+
+                        # 샘플 이미지 시각화 (있는 경우)
+                        if 'sample_images' in metrics:
+                            st.image(metrics['sample_images'], caption=["입력", "예측", "정답"], width=150)
+                
+                # 비동기 학습 실행
+                asyncio.run(st.session_state.trainer.train_with_callback( 
+                    num_epochs=st.session_state.total_epochs,
+                    progress_callback=update_progress
+                ))
         
-        # else:
-        with row2:
+        else:
+        # with row2:
             # 학습 시작 전 데이터 미리보기
             if 'training_data' in st.session_state:
                 st.subheader("데이터 미리보기")

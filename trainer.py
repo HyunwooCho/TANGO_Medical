@@ -6,10 +6,13 @@ from torch.utils.data import DataLoader
 import monai
 from monai.data import Dataset, CacheDataset, partition_dataset
 from monai.transforms import (
-    Compose, LoadImaged, EnsureChannelFirstd, ScaleIntensityd,
+    Compose, LoadImaged, EnsureChannelFirstd, 
+    Orientationd, Spacingd, ScaleIntensityd,
     RandRotated, RandZoomd, RandGaussianNoised,
-    ResizeWithPadOrCropd, ToTensord
+    ResizeWithPadOrCropd, ToTensord,
+    AsDiscrete, Activations
 )
+from monai.data import decollate_batch
 from monai.metrics import DiceMetric
 from monai.losses import DiceLoss, DiceCELoss
 import matplotlib.pyplot as plt
@@ -39,6 +42,9 @@ class MedicalImageTrainer:
         self.learning_rate = learning_rate
         self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
+        self.batch_size = 1
+        self.train_data = 1
+        self.val_data = 1
         self.train_loader = None
         self.val_loader = None
         self.optimizer = None
@@ -179,14 +185,24 @@ class MedicalImageTrainer:
 
         """
         변환 과정 설명(모든 함수 끝의 'd'는 딕셔너리를 의미)
-            1. LoadImaged(keys=["image", "label"], ensure_channel_first=True)
+            0. LoadImaged(keys=["image", "label"], ensure_channel_first=True)
                 image와 label을 파일에서 로드하여 딕셔너리 형태로 변환한다.
                 예를 들어, NIfTI (.nii, .nii.gz) 같은 의료 영상 데이터를 불러올 때 사용된다.
                 채널 우선 형식 자동 변환 (H, W, D, C) -> (C, H, W, D) / (H, W, D) -> (1, H, W, D)
 
-            2. EnsureChannelFirstd(keys=["label"])
+            1. Orientationd(keys=["image", "label"], axcodes="RAS")
+                MRI 정렬 변환으로 표준 좌표계(RAS; Right, Anterior, Superior)로 정렬
+                BraTS 데이터셋의 경우 이미 되어 있으므로 불필요, 방향 정보가 섞인 다른 의료 데이터셋을 위해 유지
+            
+            2. Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0))
+                Voxel 크기 정규화(모든 데이터가 동일한 해상도를 갖도록 변환)
+                의료 영상은 데이터셋마다 픽셀 간 거리(Voxel spacing)가 다를 수 있음
+                BraTS 데이터셋의 일반적으로 1mm x 1mm x 1mm Voxel 크기를 가지므로 꼭 필요하지는 않음
+
+            x. EnsureChannelFirstd(keys=["label"])
                 label의 채널 차원을 가장 앞 축으로 설정한다.
                 3D 의료 영상의 경우 (H, W, D) → (1, H, W, D)로 채널 차원을 추가한다.
+                0에서 ensure_channe_first=True로 했으므로 불필요
 
             3. ScaleIntensityd(keys=["image"])
                 image 데이터의 픽셀 값을 정규화한다.
@@ -197,29 +213,31 @@ class MedicalImageTrainer:
                 작은 이미지는 padding을 추가하여 키우고, 큰 이미지는 cropping하여 줄인다.
                 image와 label이 동일한 크기가 되도록 유지하는 것이 중요하다.
 
-            5. RandRotated(keys=["image", "label"], range_x=0.3, range_y=0.3, range_z=0.3, prob=0.2)
+            a ~ c : 데이터 증강 변환에 해당(Train에서만 적용)
+            a. RandRotated(keys=["image", "label"], range_x=0.3, range_y=0.3, range_z=0.3, prob=0.2)
                 image와 label을 랜덤으로 회전시킨다.
                 range_x=0.3, range_y=0.3, range_z=0.3 → x, y, z축 기준 최대 0.3 라디안(약 17도) 회전.
                 prob=0.2 → 20% 확률로 회전 적용.
 
-            6. RandZoomd(keys=["image", "label"], min_zoom=0.7, max_zoom=1.2, prob=0.2)
+            b. RandZoomd(keys=["image", "label"], min_zoom=0.7, max_zoom=1.2, prob=0.2)
                 image와 label에 랜덤 확대/축소 적용.
                 min_zoom=0.7, max_zoom=1.2 → 70%~120% 크기로 랜덤 변환.
                 prob=0.2 → 20% 확률로 적용.
 
-            7. RandGaussianNoised(keys=["image"], prob=0.2)
+            c. RandGaussianNoised(keys=["image"], prob=0.2)
                 image에 가우시안 노이즈 추가.
                 prob=0.2 → 20% 확률로 노이즈 적용.
                 데이터 다양성을 높이고 모델의 일반화 성능을 개선하는 데 도움.
 
-            8. ToTensord(keys=["image", "label"])
+            5. ToTensord(keys=["image", "label"])
                 image와 label을 PyTorch 텐서로 변환.
                 모델이 입력으로 받을 수 있는 형식으로 변환.        
         """
         if is_train:
             transforms = Compose([
                 LoadImaged(keys=["image", "label"], ensure_channel_first=True),
-                # EnsureChannelFirstd(keys=["label"]),
+                Orientationd(keys=["image", "label"], axcodes="RAS"),
+                Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0)),
                 ScaleIntensityd(keys=["image"]),
                 ResizeWithPadOrCropd(keys=["image", "label"], spatial_size=(128, 128, 128)),
                 RandRotated(keys=["image", "label"], range_x=0.3, range_y=0.3, range_z=0.3, prob=0.2),
@@ -230,7 +248,8 @@ class MedicalImageTrainer:
         else:
             transforms = Compose([
                 LoadImaged(keys=["image", "label"], ensure_channel_first=True),
-                # EnsureChannelFirstd(keys=["label"]),
+                Orientationd(keys=["image", "label"], axcodes="RAS"),
+                Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0)),
                 ScaleIntensityd(keys=["image"]),
                 ResizeWithPadOrCropd(keys=["image", "label"], spatial_size=(128, 128, 128)),
                 ToTensord(keys=["image", "label"]),
@@ -238,7 +257,7 @@ class MedicalImageTrainer:
         
         return transforms
     
-    def prepare_data(self, train_files, val_files=None, val_ratio=0.2, batch_size=16, cache_data=False):
+    def prepare_data(self, train_files, val_files=None, val_ratio=0.2, batch_size=1, cache_data=False):
         """
         nii.gz 파일로부터 변환하여 학습/검증 데이터셋 생성하고 그를 위한 데이터 로더 준비
         
@@ -289,6 +308,10 @@ class MedicalImageTrainer:
         
         self.train_loader = train_loader
         self.val_loader = val_loader
+
+        self.batch_size = batch_size
+        self.train_data = len(train_ds)
+        self.val_data = len(val_ds)
 
         # return train_loader, val_loader
 
@@ -464,9 +487,8 @@ class MedicalImageTrainer:
             metric = None
             if self.val_loader:
                 self.model.eval()
+                self.dice_metric.reset()
                 with torch.no_grad():
-                    metric_sum = 0.0
-                    metric_count = 0
                     val_step = 0
                     
                     for val_data in self.val_loader:
@@ -481,23 +503,28 @@ class MedicalImageTrainer:
 
                         # Forward pass
                         val_outputs = self.model(val_inputs)
-                        
+                        self.logger.info(val_outputs.shape)
+
                         # Apply softmax to convert logits to probabilities
-                        val_outputs = torch.softmax(val_outputs, dim=1)
+                        post_trans = monai.transforms.Compose([
+                            Activations(softmax=True),  # softmax 활성화하여 확률 분포로 변환 (multi-class segmentation)
+                            AsDiscrete(argmax=True)     # 가장 높은 확률을 가진 클래스로 변환
+                        ])
+                        output_list = decollate_batch(val_outputs)
+                        self.logger.info(output_list)
+                        if isinstance(output_list, list):
+                            val_outputs = [post_trans(i) for i in output_list]
+                        else:
+                            val_outputs = post_trans(output_list)
+                        val_outputs = [post_trans(i) for i in decollate_batch(val_outputs)]
+                        val_labels = [AsDiscrete(to_onehot=self.num_classes)(i) for i in decollate_batch(val_labels)]
 
                         # Compute Dice metric
                         # Use compute method to get the metric value
-                        dice_value = self.dice_metric(y_pred=val_outputs, y=val_labels) #.item()
+                        self.dice_metric(y_pred=val_outputs, y=val_labels)
                         
-                        # If dice_value is a tensor, convert to a scalar
-                        if isinstance(dice_value, torch.Tensor):
-                            dice_value = dice_value.item()
-                        
-                        metric_count += 1
-                        metric_sum += dice_value
-                    
                     # Calculate average metric
-                    metric = metric_sum / metric_count
+                    metric = self.dice_metric.aggregate().item()
                     self.metric_values.append(metric)
                     
                     if metric > self.best_metric:
@@ -508,6 +535,8 @@ class MedicalImageTrainer:
                             os.path.join(save_dir, f"best_model_{self.model_type}.pth")
                         )
                         self.logger.info("모델 저장!")
+                    
+                    self.dice_metric.reset()
             
             # 학습률 가져오기 (옵티마이저에 따라 다를 수 있음)
             current_lr = self.optimizer.param_groups[0]['lr']
@@ -820,6 +849,20 @@ class MedicalImageTrainer:
         
         self.logger.info(f"{num_samples}개의 샘플 데이터를 {output_dir}에 생성했습니다.")
         return data_dicts
+
+    def get_args(self):
+        return {
+            "model_type": self.model_type,
+            "num_classes": self.num_classes,
+            "learning_rate": self.learning_rate,
+            "device": self.device,
+            "batch_size": self.batch_size,
+            "train_data_count": self.train_data,
+            "val_data_count": self.val_data,
+            "optim": self.optimizer.__class__.__name__,
+            "loss_func": self.loss_function.__class__.__name__,
+            "metric": self.dice_metric.__class__.__name__,
+        }
 
 
 
