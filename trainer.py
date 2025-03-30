@@ -7,9 +7,12 @@ import monai
 from monai.data import Dataset, CacheDataset, partition_dataset
 from monai.transforms import (
     Compose, LoadImaged, EnsureChannelFirstd, 
+    ConvertToMultiChannelBasedOnBratsClassesd,
+    NormalizaIntensityd, RandScaleIntensityd, RandShiftIntensityd,
     Orientationd, Spacingd, ScaleIntensityd,
-    RandRotated, RandZoomd, RandGaussianNoised,
-    ResizeWithPadOrCropd, ToTensord,
+    RnadFlipd, RandRotated, RandZoomd, RandGaussianNoised,
+    ResizeWithPadOrCropd, CropForegroundd, RandSpatialCropd,
+    ToTensord,
     AsDiscrete, Activations
 )
 from monai.data import decollate_batch
@@ -248,6 +251,7 @@ class MedicalImageTrainer:
         else:
             transforms = Compose([
                 LoadImaged(keys=["image", "label"], ensure_channel_first=True),
+                ConvertToMultiChannelBasedOnBratsClassesd(key="label"),
                 Orientationd(keys=["image", "label"], axcodes="RAS"),
                 Spacingd(keys=["image", "label"], pixdim=(1.0, 1.0, 1.0)),
                 ScaleIntensityd(keys=["image"]),
@@ -418,6 +422,9 @@ class MedicalImageTrainer:
         
         return self.model
 
+    def stop_training(self):
+        pass
+
     async def train_with_callback(self, num_epochs=50, save_dir="./models", progress_callback=None):
         """
         코루틴 기반 비동기 모델 학습 및 검증 메서드 (with UI callback)
@@ -442,134 +449,22 @@ class MedicalImageTrainer:
             epoch_start = time.time()
             self.logger.info("-" * 10)
             self.logger.info(f"에포크 {epoch + 1}/{num_epochs}")
-            self.model.train()
-            epoch_loss = 0
-            step = 0
-            
-            for batch_data in self.train_loader:
-                # 비동기 대기 (필요한 경우)
-                await asyncio.sleep(0)
-                
-                step += 1
-                inputs, labels = batch_data["image"].to(self.device), batch_data["label"].to(self.device)
-                
-                self.optimizer.zero_grad()
-                outputs = self.model(inputs)
-                loss = self.loss_function(outputs, labels)
-                loss.backward()
-                self.optimizer.step()
-                
-                epoch_loss += loss.item()
 
-                # UI 콜백으로 10 스텝마다의 학습 손실 전송
-                # if step % 10 == 0 and progress_callback:
-                #     await progress_callback({
-                #         'epoch': epoch + 1,
-                #         'step': step,
-                #         'total_steps': len(self.train_loader),
-                #         'step_loss': loss.item(),
+            train_loss = await self._train_epoch(epoch)
+            val_metric = await self._val_epoch(epoch)
 
-                #         'loss': 0,
-                #         'dice': 0,
-                #         'learning_rate': 0
-                #     })
-
-                if step % 10 == 0:
-                    self.logger.info(f"{step}/{len(self.train_loader)}, "
-                                    f"학습 손실: {loss.item():.4f}")
-                    
-            
-            epoch_loss /= step
-            self.epoch_loss_values.append(epoch_loss)
-            self.logger.info(f"에포크 평균 손실: {epoch_loss:.4f}")
-            
-            # 검증
-            metric = None
-            if self.val_loader:
-                self.model.eval()
-                self.dice_metric.reset()
-                with torch.no_grad():
-                    val_step = 0
-                    
-                    for val_data in self.val_loader:
-                        # Optional async sleep if needed
-                        await asyncio.sleep(0)
-                        
-                        val_step += 1
-
-                        # Move inputs and labels to device
-                        val_inputs = val_data["image"].to(self.device)
-                        val_labels = val_data["label"].to(self.device)
-
-                        # Forward pass
-                        val_outputs = self.model(val_inputs)
-                        self.logger.info(val_outputs.shape)
-
-                        # Apply softmax to convert logits to probabilities
-                        post_trans = monai.transforms.Compose([
-                            Activations(softmax=True),  # softmax 활성화하여 확률 분포로 변환 (multi-class segmentation)
-                            AsDiscrete(argmax=True)     # 가장 높은 확률을 가진 클래스로 변환
-                        ])
-                        output_list = decollate_batch(val_outputs)
-                        self.logger.info(output_list)
-                        if isinstance(output_list, list):
-                            val_outputs = [post_trans(i) for i in output_list]
-                        else:
-                            val_outputs = post_trans(output_list)
-                        val_outputs = [post_trans(i) for i in decollate_batch(val_outputs)]
-                        val_labels = [AsDiscrete(to_onehot=self.num_classes)(i) for i in decollate_batch(val_labels)]
-
-                        # Compute Dice metric
-                        # Use compute method to get the metric value
-                        self.dice_metric(y_pred=val_outputs, y=val_labels)
-                        
-                    # Calculate average metric
-                    metric = self.dice_metric.aggregate().item()
-                    self.metric_values.append(metric)
-                    
-                    if metric > self.best_metric:
-                        self.best_metric = metric
-                        self.best_metric_epoch = epoch + 1
-                        torch.save(
-                            self.model.state_dict(),
-                            os.path.join(save_dir, f"best_model_{self.model_type}.pth")
-                        )
-                        self.logger.info("모델 저장!")
-                    
-                    self.dice_metric.reset()
-            
-            # 학습률 가져오기 (옵티마이저에 따라 다를 수 있음)
-            current_lr = self.optimizer.param_groups[0]['lr']
-            
-            # UI 콜백 호출
             if progress_callback:
-                await progress_callback({
-                    'epoch': epoch + 1,
-                    'loss': epoch_loss,
-                    'dice': metric if metric is not None else 0,
-                    'learning_rate': current_lr
-                })
-            
-            # 중간 모델 저장 (5 에포크마다)
-            if (epoch + 1) % 5 == 0:
-                torch.save(
-                    self.model.state_dict(),
-                    os.path.join(save_dir, f"{self.model_type}_epoch{epoch+1}.pth")
-                )
-            
+                epoch_metric = {"loss": train_loss, "dice": val_metric,}
+                progress_callback(epoch_metric)
+            await self._save_model(epoch)            
+
             epoch_end = time.time()
             self.logger.info(f"에포크 시간: {epoch_end - epoch_start:.4f} 초")
         
         total_end = time.time()
         self.logger.info(f"학습 완료! 총 시간: {total_end - total_start:.4f} 초")
         self.logger.info(f"최고 성능: {self.best_metric:.4f} (에포크: {self.best_metric_epoch})")
-        
-        # 최종 모델 저장
-        torch.save(
-            self.model.state_dict(),
-            os.path.join(save_dir, f"final_model_{self.model_type}.pth")
-        )
-        
+       
         return self.model
     
     async def train_with_progress(self, num_epochs=50, save_dir="./models"):
@@ -594,7 +489,7 @@ class MedicalImageTrainer:
             self.logger.info(f"에포크 {epoch + 1}/{num_epochs}")
 
             # 학습 수행: 진행 상황 메트릭 생성
-            train_metrics = await self._train_epoch(epoch)
+            train_metrics = await self._train_epoch()
 
             # 검증 수행: 검증 진행 상황 메트릭 생성
             if self.val_loader:
@@ -604,7 +499,7 @@ class MedicalImageTrainer:
                 yield {
                     'epoch': epoch + 1,
                     'total_epochs': num_epochs,
-                    'train_loss': train_metrics['epoch_loss'],
+                    'train_loss': train_metrics,
                     'val_dice': val_metrics['metric'],
                     'best_dice': val_metrics['best_metirc']
                 }
@@ -613,7 +508,7 @@ class MedicalImageTrainer:
                 yield {
                     'epoch': epoch + 1,
                     'total_epochs': num_epochs,
-                    'train_loss': train_metrics['epoch_loss']                    
+                    'train_loss': train_metrics 
                 }
 
             # 중간 모델 저장
@@ -631,15 +526,14 @@ class MedicalImageTrainer:
         
         # return self.model
 
-    async def _train_epoch(self, epoch):
+    async def _train_epoch(self):
         """
         단일 에포크 학습 비동기 메서드
         """
         self.model.train()
         epoch_loss = 0
         step = 0
-        
-        # 비동기 처리를 위한 대기 지점 추가
+
         for batch_data in self.train_loader:
             await asyncio.sleep(0)  # 이벤트 루프에 제어권 양도
             
@@ -653,18 +547,20 @@ class MedicalImageTrainer:
             self.optimizer.step()
             
             epoch_loss += loss.item()
+            yield {
+                'step': step,
+                'total_step': len(self.train_loader),
+                'loss': epoch_loss / step,
+            }
             if step % 10 == 0:
                 self.logger.info(f"{step}/{len(self.train_loader)}, "
                                 f"학습 손실: {loss.item():.4f}")
         
-        epoch_loss /= step
+        epoch_loss /= step # epoch_loss /= self.batch_size
         self.epoch_loss_values.append(epoch_loss)
         self.logger.info(f"에포크 평균 손실: {epoch_loss:.4f}")
         
-        return {
-            'epoch_loss': epoch_loss,
-            'step': step
-        }
+        return epoch_loss
 
     async def _validate_epoch(self, epoch):
         """
@@ -707,6 +603,51 @@ class MedicalImageTrainer:
                 'best_metric': self.best_metric,
                 'best_metric_epoch': self.best_metric_epoch
             }
+
+    async def _val_epoch(self, epoch, acc_func, args, model_inferer=None, post_sigmoid=None, post_pred=None):
+        self.model.eval()
+        start_time = time.time()
+        run_acc = AverageMeter()
+
+        with torch.no_grad():
+            for idx, batch_data in enumerate(self.val_loader):
+                data= batch_data["image"].to(self.device)
+                target = batch_data["label"].to(self.device)
+                logits = model_inferer(data)
+                
+                val_labels_list = decollate_batch(target)
+                val_outputs_list = decollate_batch(logits)
+                val_output_convert = [post_pred(post_sigmoid(val_pred_tensor)) for val_pred_tensor in val_outputs_list]
+                acc_func.reset()
+                acc_func(y_pred=val_output_convert, y=val_labels_list)
+                acc, not_nans = acc_func.aggregate()
+                acc = acc.cuda(args.rank)
+                if args.distributed:
+                    acc_list, not_nans_list = distributed_all_gather(
+                        [acc, not_nans], out_numpy=True, is_valid=idx < loader.sampler.valid_length
+                    )
+                    for al, nl in zip(acc_list, not_nans_list):
+                        run_acc.update(al, n=nl)
+                else:
+                    run_acc.update(acc.cpu().numpy(), n=not_nans.cpu().numpy())
+
+                if args.rank == 0:
+                    Dice_TC = run_acc.avg[0]
+                    Dice_WT = run_acc.avg[1]
+                    Dice_ET = run_acc.avg[2]
+                    print(
+                        "Val {}/{} {}/{}".format(epoch, args.max_epochs, idx, len(loader)),
+                        ", Dice_TC:",
+                        Dice_TC,
+                        ", Dice_WT:",
+                        Dice_WT,
+                        ", Dice_ET:",
+                        Dice_ET,
+                        ", time {:.2f}s".format(time.time() - start_time),
+                    )
+                start_time = time.time()
+
+        return run_acc.avg
 
     async def _save_model(self, epoch, save_dir, train_metrics, val_metrics=None):
         """
